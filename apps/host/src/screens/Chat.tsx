@@ -634,7 +634,10 @@ function Message({ message: m, isLast, onEditPrompt, onPreview, onOpenLink, onOp
       {tr(m.reasoning ? <ReasoningBlock message={m}/> : null)}
 
 
-      {tr((m.tools ?? []).filter(t => !grouped || t.state !== 'done').map((t) => (<ToolCard key={t.id} messageId={m.id} tool={t}/>)))}
+      {/* History rows stay above the answer; a card that still waits for an answer
+          sits at the live end of the turn, just above the composer, where the
+          reader already is — not at the top of a turn that can be a screen tall. */}
+      {tr((m.tools ?? []).filter(t => grouped && t.state !== 'done' && t.state !== 'proposed' && t.state !== 'running').map((t) => (<ToolCard key={t.id} messageId={m.id} tool={t}/>)))}
 
       {tr(!(m.timeSkipId && timeSkipReal && !timeSkipDone) && (m.content || m.error || !m.streaming || !liveStatus) ? <div className="st-bubble">
         {tr(planCard ? <PlanCard chatId={activeSession} planId={m.planId!}/> : null)}
@@ -647,6 +650,8 @@ function Message({ message: m, isLast, onEditPrompt, onPreview, onOpenLink, onOp
           </span>) : null)}
         {tr(m.streaming && m.content ? <span className="caret" aria-hidden="true"/> : null)}
       </div> : null)}
+      {/* A card that waits for an answer (proposed or running) belongs at the live end of the turn: the agent is paused exactly there, and the reader is already at the bottom. */}
+      {tr((m.tools ?? []).filter(t => !grouped || t.state === 'done' || t.state === 'proposed' || t.state === 'running').map((t) => (<ToolCard key={t.id} messageId={m.id} tool={t}/>)))}
       {tr(m.skills?.length && !m.streaming ? <SkillsUsed skills={m.skills}/> : null)}
       {tr(m.deliverables?.length && !m.streaming ? <div className="deliverables">{m.deliverables.map(f => <FileCard key={f.path} file={f} sessionId={activeSession ?? ''} onPreview={onPreview}/>)}<EditedFiles files={m.deliverables} sessionId={activeSession ?? ''} onPreview={onPreview}/></div> : null)}
       {tr(m.streaming && isLast && !m.timeSkipId ? <StatusLine sessionId={activeSession} startedAt={Date.parse(m.at) || Date.now()} tokens={m.tokens}/> : null)}
