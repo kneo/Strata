@@ -279,6 +279,32 @@ export function ChatScreen() {
         if (pinned.current || sent)
             scrollToLatest();
     }, [session?.messages.length, session?.messages.at(-1)?.content, scrollToLatest]);
+    /**
+     * An approval that appears mid-turn stays in the transcript's time order (the tool
+     * rows render where they happened), but a long turn can leave it off screen at either
+     * end — which is what an earlier fix answered by moving the card below the answer and
+     * breaking the flow with it. Instead, when a card newly waits for approval, the
+     * transcript brings it to the middle of the view once. If the card turns out to be
+     * past the end anyway, centring lands at the bottom and the follow-the-stream pin
+     * holds; a reader who scrolled away is pulled only to the decision they must make.
+     */
+    const seenApprovals = useRef<Set<string>>(new Set());
+    useEffect(() => {
+        const ids = (session?.messages ?? []).flatMap(m => (m.tools ?? []).filter(t => t.state === 'proposed' && t.ask).map(t => t.id));
+        const fresh = ids.filter(id => !seenApprovals.current.has(id));
+        seenApprovals.current = new Set(ids);
+        if (!fresh.length)
+            return;
+        const el = scroller.current;
+        if (!el)
+            return;
+        const card = fresh.map(id => el.querySelector(`[data-approval-card="${CSS.escape(id)}"]`)).find(Boolean);
+        if (card) {
+            card.scrollIntoView({ block: 'center', behavior: scrollBehavior() });
+            pinned.current = distanceFromBottom(el) <= 24;
+            setAwayFromBottom(distanceFromBottom(el) > PILL_DISTANCE);
+        }
+    }, [session?.messages]);
     // Scroll position is remembered per conversation, so returning to one puts you
     // back where you were reading rather than at the top or the bottom.
     useEffect(() => {
@@ -653,10 +679,14 @@ function Message({ message: m, isLast, onEditPrompt, onPreview, onOpenLink, onOp
       {tr(m.reasoning ? <ReasoningBlock message={m}/> : null)}
 
 
-      {/* History rows stay above the answer; a card that still waits for an answer
-          sits at the live end of the turn, just above the composer, where the
-          reader already is — not at the top of a turn that can be a screen tall. */}
-      {tr((m.tools ?? []).filter(t => grouped && t.state !== 'done' && t.state !== 'proposed' && t.state !== 'running').map((t) => (<ToolCard key={t.id} messageId={m.id} tool={t}/>)))}
+      {/* Tool rows render in the order they arrived, before the text that followed them:
+          the answer keeps its place in the flow, an approved action keeps its place in
+          time, and the agent's activity groups (the collapsible "Ran 2 commands" lines)
+          sit between the pieces of text they belong between. A card that newly waits for
+          approval is brought into view by the scroller instead of being moved out of the
+          sequence — placing it after the answer hid the answer and stacked the approved
+          rows below it (the 8f28a380 try). */}
+      {tr((m.tools ?? []).map((t) => (<ToolCard key={t.id} messageId={m.id} tool={t}/>)))}
 
       {tr(!(m.timeSkipId && timeSkipReal && !timeSkipDone) && (m.content || m.error || !m.streaming || !liveStatus) ? <div className="st-bubble">
         {tr(planCard ? <PlanCard chatId={activeSession} planId={m.planId!}/> : null)}
@@ -669,8 +699,6 @@ function Message({ message: m, isLast, onEditPrompt, onPreview, onOpenLink, onOp
           </span>) : null)}
         {tr(m.streaming && m.content ? <span className="caret" aria-hidden="true"/> : null)}
       </div> : null)}
-      {/* A card that waits for an answer (proposed or running) belongs at the live end of the turn: the agent is paused exactly there, and the reader is already at the bottom. */}
-      {tr((m.tools ?? []).filter(t => !grouped || t.state === 'done' || t.state === 'proposed' || t.state === 'running').map((t) => (<ToolCard key={t.id} messageId={m.id} tool={t}/>)))}
       {tr(m.skills?.length && !m.streaming ? <SkillsUsed skills={m.skills}/> : null)}
       {tr(m.deliverables?.length && !m.streaming ? <div className="deliverables">{m.deliverables.map(f => <FileCard key={f.path} file={f} sessionId={activeSession ?? ''} onPreview={onPreview}/>)}<EditedFiles files={m.deliverables} sessionId={activeSession ?? ''} onPreview={onPreview}/></div> : null)}
       {tr(m.streaming && isLast && !m.timeSkipId ? <StatusLine sessionId={activeSession} startedAt={Date.parse(m.at) || Date.now()} tokens={m.tokens}/> : null)}
@@ -725,7 +753,7 @@ function ToolCard({ messageId, tool: t }: {
     if (!pending && t.state !== 'running')
         return <details className="disclosure tool-summary"><summary><Icon name="chevron" size={14}/>{tr(t.verb ?? t.name)}{t.target ? <><span>·</span><span className="tool-summary__target" title={t.target}>{t.target}</span></> : null}<span>·</span><Icon name={t.state === 'denied' || t.state === 'error' ? 'x' : 'check'} size={14}/>{tr(t.state === 'denied' ? 'Denied' : t.state === 'error' ? 'Failed' : t.live && t.state === 'done' && t.approved ? 'Approved' : 'Done')}</summary><div><code>{t.preview}</code><p className="small muted">{tr(t.result ?? t.effect)}</p></div></details>;
     if (pending && t.ask)
-        return <section className="askcard" data-state={t.state} aria-label={tr(askQuestion(t.ask))}>
+        return <section className="askcard" data-state={t.state} data-approval-card={t.id} aria-label={tr(askQuestion(t.ask))}>
       <div className="askcard__top"><span className="askcard__icon"><Icon name={askIcon(t.ask)} size={18}/></span>
         <div className="askcard__text"><p className="askcard__q">{askQuestion(t.ask)}</p>{askSub(t.ask) ? <p className="askcard__why" title={askSub(t.ask)}>{askSub(t.ask)}</p> : null}</div>
         <div className="askcard__acts"><Btn size="sm" onClick={() => resolveTool(messageId, t.id, false)}>{tr("Deny")}</Btn><Btn variant="primary" size="sm" onClick={() => resolveTool(messageId, t.id, true)}>{tr("Approve")}</Btn></div></div>
