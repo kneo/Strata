@@ -15,6 +15,8 @@ export const FOLLOW_SLACK = 24;
 export const PILL_DISTANCE = 400;
 /** A scroll this soon after the reader's own input was the reader's. */
 export const INPUT_WINDOW_MS = 400;
+/** A scroll this soon after the app asked for one (an approval card, the follow-the-stream aim) was the app's. */
+export const PROGRAMMED_WINDOW_MS = 400;
 
 export const distanceFromBottom = (el: Scroller): number => el.scrollHeight - el.scrollTop - el.clientHeight;
 
@@ -22,12 +24,18 @@ export const distanceFromBottom = (el: Scroller): number => el.scrollHeight - el
  * Whether the chat should keep following after a scroll event.
  * - back at the bottom: follow again;
  * - the reader moved it (a wheel, finger, key or the scrollbar a moment ago) and it is not at the bottom: let go;
- * - far away whatever moved it (a jump): let go;
+ * - the app moved it (it brought an approval card into view, or re-aimed at the bottom): that is not the
+ *   reader letting go, so the state stays as it was — otherwise the app's own jump of more than
+ *   PILL_DISTANCE pixels strands a reader who was following the stream, which is what the transcript
+ *   looked like after an approval appeared: one move, then nothing followed the answer any more;
+ * - far away whatever moved it (a jump the reader made with the scrollbar): let go;
  * - otherwise (the page grew under a following reader and no input came): keep the state it had.
  */
-export function followAfterScroll(distance: number, wasFollowing: boolean, msSinceInput: number): boolean {
+export function followAfterScroll(distance: number, wasFollowing: boolean, msSinceInput: number, msSinceProgrammed = Number.POSITIVE_INFINITY): boolean {
   if (distance <= FOLLOW_SLACK) return true;
-  if (msSinceInput <= INPUT_WINDOW_MS || distance > PILL_DISTANCE) return false;
+  if (msSinceInput <= INPUT_WINDOW_MS) return false;
+  if (msSinceProgrammed <= PROGRAMMED_WINDOW_MS) return wasFollowing;
+  if (distance > PILL_DISTANCE) return false;
   return wasFollowing;
 }
 

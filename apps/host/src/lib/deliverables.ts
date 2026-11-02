@@ -12,9 +12,11 @@ export interface Deliverable { path: string; abs: string; name: string; kind: De
   /** Which write came last in this reply (set when the host's frames are merged): the newest is the run's main result. */ order?: number }
 export interface GroupFile { path: string; name: string; kind: DeliverableKind; status: string; added: number; removed: number }
 export interface ActivityGroup { id: string; closed: boolean; line: string; added: number; removed: number; files: GroupFile[] }
-export type MessageBlock = { kind: 'text'; text: string; seq?: number } | ({ kind: 'group' } & ActivityGroup & { seq?: number });
+export type MessageBlock = { kind: 'text'; text: string; seq?: number; pid?: string } | ({ kind: 'group' } & ActivityGroup & { seq?: number });
 /** The arrival number that seeds a reply's pieces from text streamed before the store kept the order: it sits before every tool row. */
 export const SEED_SEQ = -1;
+/** The card the agent is waiting on: it is paused exactly at that call, so the card is the last thing of its turn. */
+export const waitingApproval = (tool: import('./types').ToolCall): boolean => tool.state === 'proposed' && !!tool.ask;
 
 const KINDS = ['html', 'markdown', 'pdf', 'csv', 'image', 'code', 'text', 'other'];
 const num = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
@@ -51,12 +53,40 @@ export function readSkills(raw: unknown): { name: string; description: string }[
   }).slice(0, 20);
 }
 
-/** Add streamed text to the reply's ordered pieces: it continues the last text piece, or starts a new one after an activity line — or after a tool row, when the caller's arrival number says the row came in between. A new piece takes the number passed; a continued piece keeps the one it already had. */
-export function appendText(blocks: MessageBlock[] | undefined, text: string, seq?: number): MessageBlock[] {
+/** A reply's pieces when text streamed before the store numbered anything: one piece that sits before every row. */
+export function seedBlocks(text: string): MessageBlock[] {
+  return [{ kind: 'text', text: tidyAnswer(text), seq: SEED_SEQ, pid: 'seed' }];
+}
+
+/** The newest arrival number among the rows and activity lines of a turn — the things that split its text. Nothing of the sort: `SEED_SEQ`. */
+export function afterSeq(carrier: { blocks?: MessageBlock[]; tools?: import('./types').ToolCall[] }): number {
+  let high = SEED_SEQ;
+  for (const b of carrier.blocks ?? []) if (b.kind === 'group' && b.seq !== undefined && b.seq > high) high = b.seq;
+  for (const t of carrier.tools ?? []) if (t.seq !== undefined && t.seq > high) high = t.seq;
+  return high;
+}
+
+/** The arrival number a new row takes: one above every number the turn already carries. */
+export function nextSeq(carrier: { blocks?: MessageBlock[]; tools?: import('./types').ToolCall[] }): number {
+  let high = SEED_SEQ;
+  for (const b of carrier.blocks ?? []) if (b.seq !== undefined && b.seq > high) high = b.seq;
+  for (const t of carrier.tools ?? []) if (t.seq !== undefined && t.seq > high) high = t.seq;
+  return high + 1;
+}
+
+/**
+ * Add streamed text to the reply's ordered pieces. `after` is the newest arrival number among the
+ * rows and activity lines (see `afterSeq`): while the last piece came after all of them a token
+ * continues it — one piece, not one piece per token — and when a row or a line came in between the
+ * token starts a new piece numbered just past them, so it reads below them. A continued piece keeps
+ * its number and its key; a key that moved would remount the Markdown of every later piece.
+ */
+export function appendText(blocks: MessageBlock[] | undefined, text: string, after?: number): MessageBlock[] {
   const list = blocks ?? [], last = list.at(-1);
-  const continues = last?.kind === 'text' && (seq === undefined || last.seq === undefined || (last.seq ?? 0) >= seq);
-  if (continues) return [...list.slice(0, -1), { kind: 'text', text: tidyAnswer(last.text + text), seq: last.seq }];
-  return [...list, { kind: 'text', text: tidyAnswer(text), seq }];
+  const continues = last?.kind === 'text' && (after === undefined || last.seq === undefined || (last.seq ?? SEED_SEQ) >= after);
+  if (continues) return [...list.slice(0, -1), { kind: 'text', text: tidyAnswer(last.text + text), seq: last.seq, pid: last.pid }];
+  const seq = after === undefined ? undefined : after + 1;
+  return [...list, { kind: 'text', text: tidyAnswer(text), seq, pid: seq === undefined ? `p-${list.length}` : `p${seq}` }];
 }
 
 /** A group frame is re-sent while it grows: the same id replaces its line where it stood; a new id goes after what came before. */
@@ -69,18 +99,24 @@ export function upsertGroup(blocks: MessageBlock[] | undefined, group: ActivityG
 export type TimelineItem = MessageBlock | { kind: 'tool'; tool: import('./types').ToolCall };
 
 /**
- * The reply's flow in the order the turn happened: text pieces and tool rows sorted by the arrival
- * number the store stamps on each. A card still waiting for an answer always comes last — the agent
- * is paused exactly there — so the decision sits at the live end of the chat where the reader
- * already is, and once it is answered the text that follows lands below the tool rows. Rows saved
- * before the order was kept fall back to the old look: tools first, in their stored order.
+ * The reply's flow in the order the turn happened: text pieces, activity lines and tool rows in the
+ * order of the arrival numbers the store stamps on each. A card still waiting for an answer is not
+ * sorted by its number but put last — the agent is paused exactly there — so the decision sits at the
+ * live end of the chat where the reader already is, and the text that follows an answer lands below
+ * the rows. A turn whose pieces or rows carry no numbers was saved before the order was kept: it
+ * falls back to the old look, rows first in the order they were stored, the waiting card last.
  */
 export function messageTimeline(blocks: MessageBlock[] | undefined, tools: import('./types').ToolCall[] | undefined): TimelineItem[] {
-  const ranked: { item: TimelineItem; rank: number }[] = [];
-  (blocks ?? []).forEach((b, i) => ranked.push({ item: b, rank: b.seq ?? i }));
-  (tools ?? []).forEach((t, i) => ranked.push({ item: { kind: 'tool', tool: t }, rank: t.state === 'proposed' && t.ask ? Number.MAX_SAFE_INTEGER : t.seq ?? -1 - i }));
-  ranked.sort((a, b) => a.rank - b.rank);
-  return ranked.map(r => r.item);
+  const pieces = blocks ?? [], rows = tools ?? [];
+  const waiting = rows.filter(waitingApproval), settled = rows.filter(t => !waitingApproval(t));
+  const asRow = (t: import('./types').ToolCall): TimelineItem => ({ kind: 'tool', tool: t });
+  if (pieces.some(b => b.seq === undefined) || settled.some(t => t.seq === undefined))
+    return [...settled.map(asRow), ...pieces, ...waiting.map(asRow)];
+  const ranked = [
+    ...pieces.map(b => ({ item: b as TimelineItem, rank: b.seq as number })),
+    ...settled.map(t => ({ item: asRow(t), rank: t.seq as number })),
+  ].sort((a, b) => a.rank - b.rank);
+  return [...ranked.map(r => r.item), ...waiting.map(asRow)];
 }
 
 /** The same file may be written more than once in a run: one card per path, with its latest numbers. */

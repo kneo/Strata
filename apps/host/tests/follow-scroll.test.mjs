@@ -29,6 +29,17 @@ test('the page growing under a following reader does not make the chat let go', 
   assert.equal(f.followAfterScroll(f.PILL_DISTANCE + 1, true, 5_000), false);
 });
 
+test('a move the transcript asked for itself does not release the follow pin', () => {
+  // an approval card brought into view, or the re-aim at the bottom: the app moved the view, so a
+  // reader who was following keeps following (this is what left the answer streaming off screen)
+  assert.equal(f.followAfterScroll(f.PILL_DISTANCE + 200, true, 5_000, 10), true);
+  assert.equal(f.followAfterScroll(200, true, 5_000, 10), true);
+  // a reader who had already let go is not pulled back into following by the app's own move
+  assert.equal(f.followAfterScroll(f.PILL_DISTANCE + 200, false, 5_000, 10), false);
+  // the reader's own wheel inside that same window is still the reader's
+  assert.equal(f.followAfterScroll(f.PILL_DISTANCE + 200, true, 20, 10), false);
+});
+
 test('the chat screen uses the reader-driven rule, not the 120 px band', async () => {
   const chat = await readFile(new URL('../src/screens/Chat.tsx', import.meta.url), 'utf8');
   assert.doesNotMatch(chat, /clientHeight < 120/);
@@ -38,4 +49,11 @@ test('the chat screen uses the reader-driven rule, not the 120 px band', async (
   assert.match(chat, /pinned\.current \|\| sent/);
   // an upward wheel on a transcript that cannot scroll must not switch following off
   assert.match(chat, /wheelLeavesBottom\(e\.deltaY\) && e\.currentTarget\.scrollTop > 0/);
+  // the scroll handler knows which moves the transcript made itself
+  assert.match(chat, /followAfterScroll\(distance, pinned\.current, Date\.now\(\) - readerInput\.current, Date\.now\(\) - programmedScroll\.current\)/);
+  // an approval card is brought in only as far as it takes, and only for a reader who is not at the
+  // live end; and no distance is read in the same tick as a scroll that has not happened yet
+  assert.match(chat, /card\.scrollIntoView\(\{ block: 'nearest'/);
+  assert.match(chat, /if \(!fresh\.length \|\| pinned\.current\)/);
+  assert.doesNotMatch(chat, /pinned\.current = distanceFromBottom\(el\)/);
 });

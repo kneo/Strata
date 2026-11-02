@@ -8,7 +8,7 @@ import { applyStatusFrame, clearStatus } from './live-status';
 import { approvalNeeded, workFinished } from './attention';
 import { applyGoalFrame } from './goal';
 import { tidyAnswer } from './answer-text';
-import { appendText, mergeDeliverable, readDeliverable, readGroup, readSkills, SEED_SEQ, upsertGroup } from './deliverables';
+import { afterSeq, appendText, mergeDeliverable, nextSeq, readDeliverable, readGroup, readSkills, seedBlocks, upsertGroup } from './deliverables';
 import { applyPlanFrame, applyQueueFrame, planApprove, queueMessage } from './plan';
 import { forkFields, isForkJob, TIME_SKIP_DURATION, timeSkipPrompt, timeSkipTabId, withTimeSkipResult, type TimeSkipFile, type TimeSkipJob, type TimeSkipRun, type TimeSkipVersion } from './time-skip';
 import { PREVIEW_EXAMPLES, type PreviewArtifact } from './artifacts';
@@ -1784,8 +1784,9 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
   const applyReasoning = (text: string) => patchAssistant((m) => ({ ...m, reasoning: (m.reasoning ?? '') + text, reasoningStartedAt: m.reasoningStartedAt ?? Date.now() }));
   /* Once a turn has tool rows its text is kept as ordered pieces too, so text streamed after a
      row lands below it instead of above the whole run: the pieces are seeded from what streamed
-     before the first row, and every new piece takes the next arrival number. */
-  const applyDelta = (text: string) => patchAssistant((m) => { const content=tidyAnswer(m.content+text); if (m.reasoningStartedAt && m.reasoningMs === undefined) m = { ...m, reasoningMs: Date.now() - m.reasoningStartedAt }; const count=Math.max(1,Math.ceil((content.length+(m.reasoning?.length??0))/4)); const pieces=m.blocks ?? (m.tools?.length && m.content ? appendText(undefined, m.content, SEED_SEQ) : undefined); return {...m,content,...(pieces?{blocks:appendText(pieces,text,pieces.length+(m.tools?.length??0))}:{}) ,tokens:m.usageSource==='estimated'&&m.tps?m.tokens:count,inputTokens:m.inputTokens??Math.ceil((body.length+prior.reduce((n,p)=>n+p.content.length,0))/4),usageSource:'estimated'}; });
+     before the first row, and a token continues the last piece unless a row or an activity line
+     came in between (afterSeq says the newest of those). */
+  const applyDelta = (text: string) => patchAssistant((m) => { const content=tidyAnswer(m.content+text); if (m.reasoningStartedAt && m.reasoningMs === undefined) m = { ...m, reasoningMs: Date.now() - m.reasoningStartedAt }; const count=Math.max(1,Math.ceil((content.length+(m.reasoning?.length??0))/4)); const pieces=m.blocks ?? (m.tools?.length && m.content ? seedBlocks(m.content) : undefined); return {...m,content,...(pieces?{blocks:appendText(pieces,text,afterSeq(m))}:{}) ,tokens:m.usageSource==='estimated'&&m.tps?m.tokens:count,inputTokens:m.inputTokens??Math.ceil((body.length+prior.reduce((n,p)=>n+p.content.length,0))/4),usageSource:'estimated'}; });
   const flushWaiting = () => {
     if (waitingTimer !== null) { clearTimeout(waitingTimer); waitingTimer = null; }
     for (const [kind, text] of waiting.splice(0)) if (kind === 'delta') applyDelta(text); else applyReasoning(text);
@@ -1869,7 +1870,7 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
           patchAssistant(m => {
             const existing = m.tools?.find(t => t.id === tool.id);
             const next: ToolCall = { ...existing, ...tool, live: true };
-            return { ...m, tools: existing ? m.tools!.map(t => t.id === tool.id ? next : t) : [...(m.tools ?? []), { ...next, seq: (m.blocks?.length ?? 0) + (m.tools?.length ?? 0) }] };
+            return { ...m, tools: existing ? m.tools!.map(t => t.id === tool.id ? next : t) : [...(m.tools ?? []), { ...next, seq: nextSeq(m) }] };
           });
         } else if (type === 'agent') {
           patchSession(sessionId, s => ({ ...s, agents: updateAgent(s.agents ?? [], frame.agent) }));
@@ -1883,15 +1884,17 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
           if (skills.length) patchAssistant(m => ({ ...m, skills }));
         } else if (type === 'activity-group') {
           const group = readGroup(frame);
-          if (group) patchAssistant(m => ({ ...m, blocks: upsertGroup(m.blocks ?? (m.content ? appendText(undefined, m.content, SEED_SEQ) : undefined), group, (m.blocks?.length ?? (m.content ? 1 : 0)) + (m.tools?.length ?? 0)) }));
+          if (group) patchAssistant(m => ({ ...m, blocks: upsertGroup(m.blocks ?? (m.content ? seedBlocks(m.content) : undefined), group, nextSeq(m)) }));
         } else if (type === 'artifacts' && Array.isArray(frame.artifacts)) {
           patchAssistant(m => ({ ...m, artifacts: frame.artifacts as PreviewArtifact[] }));
         } else if(type==='native-tool'){
           const event=frame.event as {event:string;id:string;name?:string;arguments?:Record<string,unknown>;text?:string;ok?:boolean;ms?:number};
-          if(event.id)patchAssistant(m=>{const existing=m.tools?.find(t=>t.id===event.id);const tool={id:event.id,name:event.name??existing?.name??'Connected tool',args:event.arguments??existing?.args??{},preview:'Authorized connected tool',effect:'Access configured in the MCP server',scope:'connected' as const,state:event.event==='result'?event.ok?'done' as const:'error' as const:'running' as const,result:event.text,durationMs:event.ms};return {...m,tools:[...(m.tools??[]).filter(t=>t.id!==tool.id),{...existing,...tool,...(existing?{}:{seq:(m.blocks?.length??0)+(m.tools?.length??0)})}]};});
+          if(event.id)patchAssistant(m=>{const existing=m.tools?.find(t=>t.id===event.id);const tool={id:event.id,name:event.name??existing?.name??'Connected tool',args:event.arguments??existing?.args??{},preview:'Authorized connected tool',effect:'Access configured in the MCP server',scope:'connected' as const,state:event.event==='result'?event.ok?'done' as const:'error' as const:'running' as const,result:event.text,durationMs:event.ms};return {...m,tools:[...(m.tools??[]).filter(t=>t.id!==tool.id),{...existing,...tool,...(existing?{}:{seq:nextSeq(m)})}]};});
         } else if (type === 'tool') {
           const tool = frame.tool as ChatMessage['tools'] extends (infer T)[] | undefined ? T : never;
-          patchAssistant((m) => ({ ...m, tools: [...(m.tools ?? []), { ...tool, state: 'proposed', seq: (m.blocks?.length ?? 0) + (m.tools?.length ?? 0) }] }));
+          // One row per call: a frame re-sent for a call already shown replaces it where it stood,
+          // it does not add a second card asking the same question.
+          patchAssistant((m) => ({ ...m, tools: [...(m.tools ?? []).filter(x => x.id !== tool.id), { ...tool, state: 'proposed', seq: nextSeq(m) }] }));
         } else if (type === 'stats') {
           patchAssistant((m) => ({
             ...m,
