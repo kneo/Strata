@@ -393,6 +393,8 @@ export interface ToolCall {
   live?: boolean;
   /** The person approved this call. A finished card without it was never asked about. */
   approved?: boolean;
+  /** When this row arrived in its turn, stamped by the store. Text blocks carry the same numbers, so the transcript keeps the order the turn happened in. Absent in rows saved before the order was kept. */
+  seq?: number;
 }
 
 /** A folder the model may read, and that sessions are grouped under. */

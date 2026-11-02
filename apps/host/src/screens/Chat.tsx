@@ -17,7 +17,7 @@ import { ComposerControls } from '../components/ComposerControls';
 import { ChatPhotos } from '../components/ChatPhotos';
 import { useChatPhotos, removeChatPhoto } from '../lib/chat-photos';
 import { useNative } from '../lib/native';
-import { mainResult, previewOf } from '../lib/deliverables';
+import { mainResult, messageTimeline, previewOf } from '../lib/deliverables';
 import { noModelNotice } from '../lib/no-model';
 import { ReasoningBlock } from '../components/ReasoningBlock';
 import { StatusLine } from '../components/StatusLine';
@@ -290,13 +290,13 @@ export function ChatScreen() {
             scrollToLatest();
     }, [session?.messages.length, session?.messages.at(-1)?.content, scrollToLatest]);
     /**
-     * An approval that appears mid-turn stays in the transcript's time order (the tool
-     * rows render where they happened), but a long turn can leave it off screen at either
-     * end — which is what an earlier fix answered by moving the card below the answer and
-     * breaking the flow with it. Instead, when a card newly waits for approval, the
-     * transcript brings it to the middle of the view once. If the card turns out to be
-     * past the end anyway, centring lands at the bottom and the follow-the-stream pin
-     * holds; a reader who scrolled away is pulled only to the decision they must make.
+     * A card that newly waits for approval is the last element of its turn (the reply renders as
+     * one timeline: text, then the rows that followed, then the text after them), so following
+     * the stream already shows it to a reader at the bottom. A reader who scrolled up to reread
+     * is not left with the decision off screen: the transcript brings the new card into view
+     * once. Since it is past the end, centring lands at the bottom and the follow-the-stream
+     * pin holds — they are pulled to the live end they were already following, not to the middle
+     * of the turn.
      */
     const seenApprovals = useRef<Set<string>>(new Set());
     useEffect(() => {
@@ -666,8 +666,6 @@ function MessageView({ message: m, isLast, onEditPrompt, onPreview, onOpenLink, 
     // A reply that proposed a plan shows the plan card in place of its closing text (which is the plan in prose).
     const storedPlan = usePlanQuiet(m.planId ? activeSession : null);
     const planCard = !!m.planId && storedPlan?.id === m.planId;
-    // A reply with activity lines is drawn piece by piece in the order it came; one without is the plain text it always was.
-    const grouped = !!m.blocks?.some(b => b.kind === 'group');
     const [sentTime, setSentTime] = useState(() => relTime(m.at));
     if (m.role === 'user') {
         return (<div className="st-msg st-msg--user" onMouseEnter={() => setSentTime(relTime(m.at))} onFocus={() => setSentTime(relTime(m.at))}>
@@ -690,26 +688,29 @@ function MessageView({ message: m, isLast, onEditPrompt, onPreview, onOpenLink, 
       {tr(m.reasoning ? <ReasoningBlock message={m}/> : null)}
 
 
-      {/* Tool rows render in the order they arrived, before the text that followed them:
-          the answer keeps its place in the flow, an approved action keeps its place in
-          time, and the agent's activity groups (the collapsible "Ran 2 commands" lines)
-          sit between the pieces of text they belong between. A card that newly waits for
-          approval is brought into view by the scroller instead of being moved out of the
-          sequence — placing it after the answer hid the answer and stacked the approved
-          rows below it (the 8f28a380 try). */}
-      {tr((m.tools ?? []).map((t) => (<ToolCard key={t.id} messageId={m.id} tool={t}/>)))}
-
+      {/* The reply reads in the order the turn happened: text, then the command rows that
+          followed it, then the text streamed after them, in one flow (messageTimeline sorts the
+          pieces and the tool rows by their arrival number). A card still waiting for an answer is
+          always the last element of the turn — the agent is paused exactly there — so the decision
+          sits at the live end of the chat where the reader already is, and once it is answered the
+          model's next words continue below the command output rather than above it. (The 8f28a380
+          try moved the card above the composer and out of the flow; ce6aa0dd kept the old order
+          and only scrolled to the card.) */}
       {tr(!(m.timeSkipId && timeSkipReal && !timeSkipDone) && (m.content || m.error || !m.streaming || !liveStatus) ? <div className="st-bubble">
         {tr(planCard ? <PlanCard chatId={activeSession} planId={m.planId!}/> : null)}
         {tr(m.error ? (<ErrorNotice message={m.error} detail={m.errorDetail} {...contextRecovery(m.errorCode)}/>) : null)}
-        {tr(grouped && !planCard && !m.timeSkipId ? m.blocks!.map((b, i) => b.kind === 'group' ? <ActivityLine key={b.id} group={b} sessionId={activeSession ?? ''} onPreview={onPreview}/> : <Markdown key={i} text={b.text} onOpenLink={onOpenLink} imageSession={activeSession} onPreviewHtml={content => onPreview({ id: m.id + '-html-' + i, kind: 'website', title: 'HTML preview', content })}/>) : null)}
-        {tr(m.content && !planCard && !grouped ? (<Markdown text={m.timeSkipId && !timeSkipReal ? hostLive ? tr('This was a sample run made while the app could not reach its host.') : timeSkipDone ? tr('The result is ready. Switch between Original and Updated, or compare them side by side. This example uses sample outputs and simulated checks.') : tr('Revising the saved draft. Follow the result in the sidebar. This example uses sample outputs and simulated checks.') : m.content} onOpenLink={onOpenLink} imageSession={activeSession} onPreviewHtml={content => onPreview({ id: m.id + '-html', kind: 'website', title: 'HTML preview', content })}/>) : !m.error && m.streaming && !liveStatus ? (<span className="typing" aria-label={tr("Generating")}>
+        {tr((m.blocks?.length ?? 0) > 0 && !planCard && !m.timeSkipId ? messageTimeline(m.blocks, m.tools).map((it, i) => it.kind === 'group' ? <ActivityLine key={it.id} group={it} sessionId={activeSession ?? ''} onPreview={onPreview}/> : it.kind === 'text' ? <Markdown key={`t${i}`} text={it.text} onOpenLink={onOpenLink} imageSession={activeSession} onPreviewHtml={content => onPreview({ id: m.id + '-html-' + i, kind: 'website', title: 'HTML preview', content })}/> : <ToolCard key={it.tool.id} messageId={m.id} tool={it.tool}/>) : null)}
+        {tr(m.content && !planCard && !(m.blocks?.length ?? 0) ? (<Markdown text={m.timeSkipId && !timeSkipReal ? hostLive ? tr('This was a sample run made while the app could not reach its host.') : timeSkipDone ? tr('The result is ready. Switch between Original and Updated, or compare them side by side. This example uses sample outputs and simulated checks.') : tr('Revising the saved draft. Follow the result in the sidebar. This example uses sample outputs and simulated checks.') : m.content} onOpenLink={onOpenLink} imageSession={activeSession} onPreviewHtml={content => onPreview({ id: m.id + '-html', kind: 'website', title: 'HTML preview', content })}/>) : !m.error && m.streaming && !liveStatus ? (<span className="typing" aria-label={tr("Generating")}>
             <i />
             <i />
             <i />
           </span>) : null)}
         {tr(m.streaming && m.content ? <span className="caret" aria-hidden="true"/> : null)}
       </div> : null)}
+      {/* A reply that has no ordered pieces yet (text streamed before its first command, or a saved
+          chat from before the order was kept): its text comes first and its tool rows after it, so a
+          card waiting for an answer still sits at the end of the turn. */}
+      {tr((m.blocks?.length ?? 0) > 0 ? null : messageTimeline(undefined, m.tools).map(it => it.kind === 'tool' ? <ToolCard key={it.tool.id} messageId={m.id} tool={it.tool}/> : null))}
       {tr(m.skills?.length && !m.streaming ? <SkillsUsed skills={m.skills}/> : null)}
       {tr(m.deliverables?.length && !m.streaming ? <div className="deliverables">{m.deliverables.map(f => <FileCard key={f.path} file={f} sessionId={activeSession ?? ''} onPreview={onPreview}/>)}<EditedFiles files={m.deliverables} sessionId={activeSession ?? ''} onPreview={onPreview}/></div> : null)}
       {tr(m.streaming && isLast && !m.timeSkipId ? <StatusLine sessionId={activeSession} startedAt={Date.parse(m.at) || Date.now()} tokens={m.tokens}/> : null)}
